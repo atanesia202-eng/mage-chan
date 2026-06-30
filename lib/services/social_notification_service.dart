@@ -4,7 +4,6 @@ import 'dart:isolate';
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_notification_listener/flutter_notification_listener.dart';
 import 'package:path_provider/path_provider.dart';
 import '../database/isar_service.dart';
@@ -49,25 +48,15 @@ class SocialNotificationService {
     try {
       debugPrint('[SocialNotif] ▶ Initializing...');
       _setupMainIsolateReceiver();
-      
-      // HACK: Intercept the background method channel directly in the main isolate
-      const bgChannel = MethodChannel('flutter_notification_listener/bg_method');
-      bgChannel.setMethodCallHandler((call) async {
-        debugPrint('[SocialNotif:Hack] 🚨 INTERCEPTED METHOD: ${call.method}');
-        if (call.method == 'sink_event') {
-          try {
-            final args = call.arguments as List<dynamic>;
-            final map = args[1] as Map<dynamic, dynamic>;
-            final event = NotificationEvent.fromMap(map);
-            final data = extractDataFromEvent(event);
-            if (data != null) {
-              await _handleParsedNotification(data);
-            }
-          } catch (e) {
-            debugPrint('[SocialNotif:Hack] ❌ Error parsing event: $e');
-          }
-        }
-      });
+
+      // NOTE: do NOT register a handler on
+      // MethodChannel('flutter_notification_listener/bg_method') here.
+      // The plugin itself owns that channel internally (method 'sink_event')
+      // to deliver events into its background isolate and invoke
+      // `callbackHandle` for us. setMethodCallHandler only allows ONE
+      // handler per channel per isolate — registering our own overwrites
+      // the plugin's handler and silently breaks the entire pipeline
+      // (this was the actual root cause of notifications never being saved).
 
       await NotificationsListener.initialize(
         callbackHandle: _backgroundNotificationCallback,
@@ -90,7 +79,8 @@ class SocialNotificationService {
     );
     _receivePort!.listen((message) {
       debugPrint(
-          '[SocialNotif] 📨 Received event in main isolate: ${message.runtimeType}');
+        '[SocialNotif] 📨 Received event in main isolate: ${message.runtimeType}',
+      );
       // FIX: Accept Map<String, String> instead of NotificationEvent.
       // SendPort can only transmit primitive types, Lists, and Maps — not custom objects.
       if (message is Map) {
@@ -152,14 +142,18 @@ class SocialNotificationService {
   }
 
   /// Process a parsed notification Map in the main isolate and persist it to Isar.
-  static Future<void> _handleParsedNotification(Map<String, String> data) async {
+  static Future<void> _handleParsedNotification(
+    Map<String, String> data,
+  ) async {
     try {
       final appName = data['appName'] ?? '';
       final packageName = data['packageName'] ?? '';
       final title = data['title'] ?? '';
       final content = data['content'] ?? '';
 
-      debugPrint('[SocialNotif] 📝 Handling parsed: $appName | "$title" | "$content"');
+      debugPrint(
+        '[SocialNotif] 📝 Handling parsed: $appName | "$title" | "$content"',
+      );
 
       if (title.isEmpty && content.isEmpty) {
         debugPrint('[SocialNotif] ⏭️ Empty title and content, skipping');
@@ -176,7 +170,9 @@ class SocialNotificationService {
       await IsarService.saveSocialNotification(notif);
       debugPrint('[SocialNotif] ✅ Saved: $appName | $title | $content');
     } catch (e, stack) {
-      debugPrint('[SocialNotif] ❌ Error handling parsed notification: $e\n$stack');
+      debugPrint(
+        '[SocialNotif] ❌ Error handling parsed notification: $e\n$stack',
+      );
     }
   }
 
@@ -206,7 +202,7 @@ class SocialNotificationService {
 
     var title = _extractTitle(event);
     var content = _extractContent(event);
-    
+
     // DEBUG: Force save even if empty
     if (title.isEmpty) title = '(No Title)';
     if (content.isEmpty) content = '(No Content)';
@@ -237,10 +233,7 @@ class SocialNotificationService {
   }
 
   static String _extractContent(NotificationEvent event) {
-    for (final candidate in [
-      event.text,
-      event.message,
-    ]) {
+    for (final candidate in [event.text, event.message]) {
       final value = candidate?.trim();
       if (value != null && value.isNotEmpty) return value;
     }
@@ -300,8 +293,9 @@ class SocialNotificationService {
             ..packageName = map['packageName'] as String
             ..title = map['title'] as String
             ..content = map['content'] as String
-            ..timestamp =
-                DateTime.fromMillisecondsSinceEpoch(map['timestamp'] as int);
+            ..timestamp = DateTime.fromMillisecondsSinceEpoch(
+              map['timestamp'] as int,
+            );
 
           await IsarService.saveSocialNotification(notif);
           imported++;
@@ -363,7 +357,9 @@ void _backgroundNotificationCallback(NotificationEvent event) {
       return;
     }
 
-    print('[SocialNotif:BG] 📝 Extracted: ${data['appName']} | "${data['title']}" | "${data['content']}"');
+    print(
+      '[SocialNotif:BG] 📝 Extracted: ${data['appName']} | "${data['title']}" | "${data['content']}"',
+    );
 
     // Try forwarding to main isolate for immediate processing
     final sendPort = IsolateNameServer.lookupPortByName(_listenerPortName);
@@ -411,7 +407,10 @@ Future<void> _debugDumpRawEvent(NotificationEvent event) async {
       'isGroup': event.isGroup,
       'raw': event.raw,
     };
-    await file.writeAsString('${jsonEncode(debugData)}\n', mode: FileMode.append);
+    await file.writeAsString(
+      '${jsonEncode(debugData)}\n',
+      mode: FileMode.append,
+    );
   } catch (e) {
     print('[SocialNotif:BG] ❌ Debug dump error: $e');
   }

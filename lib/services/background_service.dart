@@ -99,8 +99,8 @@ void onStart(ServiceInstance service) async {
             ..content = data['content']!
             ..timestamp = DateTime.fromMillisecondsSinceEpoch(int.parse(data['timestamp']!));
             
-          await db!.writeTxn(() async {
-            await db!.socialNotificationModels.put(model);
+          await db.writeTxn(() async {
+            await db.socialNotificationModels.put(model);
           });
           debugPrint('[SocialNotif:HackBG] ✅ Saved notification from background isolate!');
         }
