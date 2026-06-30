@@ -25,8 +25,8 @@ class SocialNotificationService {
   /// Package names of social media apps we want to track
   static const Set<String> trackedPackages = {
     'jp.naver.line.android',
-    'com.facebook.orca',
-    'com.facebook.katana',
+    'com.facebook.orca', // Messenger (Chats only)
+    // 'com.facebook.katana', // Removed Facebook App to avoid non-chat notifications
     'com.instagram.android',
     'com.whatsapp',
     'com.twitter.android',
@@ -203,6 +203,12 @@ class SocialNotificationService {
     var title = _extractTitle(event);
     var content = _extractContent(event);
 
+    // Filter out non-message notifications (Likes, Comments, Mentions, Adds)
+    if (!_isLikelyChatMessage(packageName, title, content)) {
+      debugPrint('[SocialNotif] ⏭️ Filtered out non-message notification: "$title" | "$content"');
+      return null;
+    }
+
     // DEBUG: Force save even if empty
     if (title.isEmpty) title = '(No Title)';
     if (content.isEmpty) content = '(No Content)';
@@ -216,6 +222,35 @@ class SocialNotificationService {
       'title': title,
       'content': content,
     };
+  }
+
+  /// Heuristic to detect if a notification is a chat message rather than a social alert
+  static bool _isLikelyChatMessage(String packageName, String title, String content) {
+    // Dedicated messaging apps are almost always messages
+    if (packageName == 'com.facebook.orca' || packageName == 'com.whatsapp' || packageName == 'org.telegram.messenger') {
+      return true;
+    }
+
+    final lowerContent = content.toLowerCase();
+    final lowerTitle = title.toLowerCase();
+    
+    // Common keywords for Non-Message notifications (Thai and English)
+    final nonMessageKeywords = [
+      'ถูกใจ', 'แสดงความคิดเห็น', 'กล่าวถึง', 'เพิ่มคุณเป็นเพื่อน', 'กำลังถ่ายทอดสด',
+      'liked', 'commented', 'mentioned', 'added you', 'is live', 'followed you',
+      'เริ่มติดตามคุณ', 'ตอบกลับ', 'reacted', 'replied', 'sent an attachment'
+    ];
+
+    for (final kw in nonMessageKeywords) {
+      if (lowerContent.contains(kw) || lowerTitle.contains(kw)) {
+        // Exception: "replied to you" or "ตอบกลับ" might be a chat reply, but usually 
+        // in LINE/IG it means someone replied to a story or post. 
+        // We'll be aggressive in filtering out social noise.
+        return false;
+      }
+    }
+
+    return true;
   }
 
   static String _extractTitle(NotificationEvent event) {
