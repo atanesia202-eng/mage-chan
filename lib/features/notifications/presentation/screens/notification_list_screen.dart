@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../../../../database/isar_service.dart';
 import '../../../../models/social_notification_model.dart';
+import 'package:intl/intl.dart';
 
 class NotificationListScreen extends StatefulWidget {
   const NotificationListScreen({super.key});
@@ -11,7 +12,6 @@ class NotificationListScreen extends StatefulWidget {
 }
 
 class _NotificationListScreenState extends State<NotificationListScreen> {
-
   /// Map package name to a friendly name and icon/color
   static const Map<String, _AppInfo> _appRegistry = {
     'jp.naver.line.android': _AppInfo('LINE', Colors.green, '💬'),
@@ -31,156 +31,219 @@ class _NotificationListScreenState extends State<NotificationListScreen> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
 
-    return Scaffold(
-      appBar: AppBar(title: const Text('แจ้งเตือนโซเชียลวันนี้')),
-      body: StreamBuilder<List<SocialNotificationModel>>(
-        stream: IsarService.watchSocialNotifications(),
-        builder: (context, snapshot) {
-          if (!snapshot.hasData) {
-            return const Center(child: CircularProgressIndicator());
-          }
+    return StreamBuilder<List<SocialNotificationModel>>(
+      stream: IsarService.watchSocialNotifications(),
+      builder: (context, snapshot) {
+        if (!snapshot.hasData) {
+          return Scaffold(
+            appBar: AppBar(title: const Text('ประวัติการแจ้งเตือน')),
+            body: const Center(child: CircularProgressIndicator()),
+          );
+        }
 
-          final now = DateTime.now();
-          // Filter today's notifications only
-          final todayNotifs = snapshot.data!.where((n) =>
-            n.timestamp.year == now.year &&
-            n.timestamp.month == now.month &&
-            n.timestamp.day == now.day
-          ).toList();
+        final now = DateTime.now();
+        final cutoffDate = now.subtract(const Duration(days: 14));
 
-          if (todayNotifs.isEmpty) {
-            return Center(
+        // Filter last 14 days and sort by newest first
+        var notifs = snapshot.data!
+            .where((n) => n.timestamp.isAfter(cutoffDate))
+            .toList();
+        notifs.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+
+        if (notifs.isEmpty) {
+          return Scaffold(
+            appBar: AppBar(title: const Text('ประวัติการแจ้งเตือน')),
+            body: Center(
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   Icon(Icons.notifications_off, size: 64, color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.4)),
                   const SizedBox(height: 16),
-                  Text('ไม่มีแจ้งเตือนวันนี้', style: theme.textTheme.titleMedium?.copyWith(color: Colors.grey)),
+                  Text('ไม่มีแจ้งเตือนใน 14 วันที่ผ่านมา', style: theme.textTheme.titleMedium?.copyWith(color: Colors.grey)),
                   const SizedBox(height: 8),
-                  Text('ข้อความจาก LINE, IG, FB จะปรากฏที่นี่', style: theme.textTheme.bodySmall?.copyWith(color: Colors.grey)),
+                  Text('ข้อความจากแชทต่างๆ จะปรากฏที่นี่', style: theme.textTheme.bodySmall?.copyWith(color: Colors.grey)),
                 ],
               ),
-            );
-          }
+            ),
+          );
+        }
 
-          // Group by appName
-          final Map<String, List<SocialNotificationModel>> grouped = {};
-          for (final n in todayNotifs) {
-            grouped.putIfAbsent(n.packageName, () => []).add(n);
-          }
+        // Group by appName
+        final Map<String, List<SocialNotificationModel>> groupedByApp = {};
+        for (final n in notifs) {
+          groupedByApp.putIfAbsent(n.packageName, () => []).add(n);
+        }
 
-          return ListView(
-            padding: const EdgeInsets.all(16),
-            children: [
-              // Summary chips at the top
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: grouped.entries.map((entry) {
-                  final info = _getAppInfo(entry.key);
-                  return _buildAppChip(theme, info, entry.value.length, entry.key);
+        final appKeys = groupedByApp.keys.toList();
+
+        return DefaultTabController(
+          length: appKeys.length,
+          child: Scaffold(
+            appBar: AppBar(
+              title: const Text('ประวัติข้อความ (14 วัน)'),
+              bottom: TabBar(
+                isScrollable: true,
+                tabs: appKeys.map((key) {
+                  final info = _getAppInfo(key);
+                  final count = groupedByApp[key]!.length;
+                  return Tab(
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(info.emoji),
+                        const SizedBox(width: 4),
+                        Text(info.name),
+                        const SizedBox(width: 8),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: info.color.withValues(alpha: 0.2),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Text('$count', style: TextStyle(color: info.color, fontSize: 10, fontWeight: FontWeight.bold)),
+                        ),
+                      ],
+                    ),
+                  );
                 }).toList(),
               ),
-              const SizedBox(height: 24),
+            ),
+            body: TabBarView(
+              children: appKeys.map((key) {
+                final appNotifs = groupedByApp[key]!;
+                return _buildAppMessageList(theme, key, appNotifs);
+              }).toList(),
+            ),
+          ),
+        );
+      },
+    );
+  }
 
-              // All notifications list
-              Text('รายละเอียดแจ้งเตือน', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold)),
-              const SizedBox(height: 12),
+  Widget _buildAppMessageList(ThemeData theme, String packageName, List<SocialNotificationModel> notifs) {
+    final info = _getAppInfo(packageName);
 
-              ...grouped.entries.expand((entry) {
-                final info = _getAppInfo(entry.key);
-                return [
-                  // App Header
-                  Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 8),
+    // Group by Date String
+    final Map<String, List<SocialNotificationModel>> groupedByDate = {};
+    for (final n in notifs) {
+      final dateStr = _formatDateGroup(n.timestamp);
+      groupedByDate.putIfAbsent(dateStr, () => []).add(n);
+    }
+
+    return ListView.builder(
+      padding: const EdgeInsets.all(16),
+      itemCount: groupedByDate.length,
+      itemBuilder: (context, index) {
+        final dateKey = groupedByDate.keys.elementAt(index);
+        final dayNotifs = groupedByDate[dateKey]!;
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(top: 8, bottom: 12),
+              child: Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: theme.colorScheme.surfaceContainerHighest,
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    child: Text(
+                      dateKey,
+                      style: theme.textTheme.labelMedium?.copyWith(
+                        fontWeight: FontWeight.bold,
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                  const Expanded(child: Divider(indent: 16)),
+                ],
+              ),
+            ),
+            ...dayNotifs.map((notif) {
+              final time = '${notif.timestamp.hour.toString().padLeft(2, '0')}:${notif.timestamp.minute.toString().padLeft(2, '0')}';
+              return Card(
+                elevation: 0,
+                margin: const EdgeInsets.only(bottom: 8),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                  side: BorderSide(color: info.color.withValues(alpha: 0.3)),
+                ),
+                child: InkWell(
+                  onTap: () => _openApp(packageName),
+                  borderRadius: BorderRadius.circular(16),
+                  child: Padding(
+                    padding: const EdgeInsets.all(12),
                     child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(info.emoji, style: const TextStyle(fontSize: 20)),
-                        const SizedBox(width: 8),
-                        Text(info.name, style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.bold, color: info.color)),
-                        const Spacer(),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                          decoration: BoxDecoration(
-                            color: info.color.withValues(alpha: 0.15),
-                            borderRadius: BorderRadius.circular(12),
+                        CircleAvatar(
+                          radius: 20,
+                          backgroundColor: info.color.withValues(alpha: 0.15),
+                          child: Text(
+                            notif.title.isNotEmpty ? notif.title[0].toUpperCase() : '?',
+                            style: TextStyle(color: info.color, fontWeight: FontWeight.bold, fontSize: 18),
                           ),
-                          child: Text('${entry.value.length} ข้อความ', style: TextStyle(color: info.color, fontSize: 12, fontWeight: FontWeight.bold)),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                children: [
+                                  Expanded(
+                                    child: Text(
+                                      notif.title,
+                                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                  Text(time, style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                                ],
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                notif.content,
+                                style: const TextStyle(fontSize: 14, height: 1.3),
+                              ),
+                            ],
+                          ),
                         ),
                       ],
                     ),
                   ),
-                  // Individual messages
-                  ...entry.value.map((notif) {
-                    final time = '${notif.timestamp.hour.toString().padLeft(2, '0')}:${notif.timestamp.minute.toString().padLeft(2, '0')}';
-                    return Card(
-                      elevation: 0,
-                      margin: const EdgeInsets.only(bottom: 6),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                        side: BorderSide(color: theme.colorScheme.outlineVariant),
-                      ),
-                      child: ListTile(
-                        dense: true,
-                        leading: CircleAvatar(
-                          radius: 16,
-                          backgroundColor: info.color.withValues(alpha: 0.15),
-                          child: Text(notif.title.isNotEmpty ? notif.title[0].toUpperCase() : '?',
-                            style: TextStyle(color: info.color, fontWeight: FontWeight.bold, fontSize: 14)),
-                        ),
-                        title: Text(notif.title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
-                        subtitle: Text(notif.content, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12)),
-                        trailing: Text(time, style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
-                        onTap: () => _openApp(entry.key),
-                      ),
-                    );
-                  }),
-                  const SizedBox(height: 8),
-                ];
-              }),
-            ],
-          );
-        },
-      ),
+                ),
+              );
+            }),
+            const SizedBox(height: 8),
+          ],
+        );
+      },
     );
   }
 
-  Widget _buildAppChip(ThemeData theme, _AppInfo info, int count, String packageName) {
-    return GestureDetector(
-      onTap: () => _openApp(packageName),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-        decoration: BoxDecoration(
-          color: info.color.withValues(alpha: 0.1),
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: info.color.withValues(alpha: 0.3)),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(info.emoji, style: const TextStyle(fontSize: 16)),
-            const SizedBox(width: 6),
-            Text(info.name, style: TextStyle(fontWeight: FontWeight.bold, color: info.color, fontSize: 13)),
-            const SizedBox(width: 6),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-              decoration: BoxDecoration(
-                color: info.color,
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: Text('$count', style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold)),
-            ),
-          ],
-        ),
-      ),
-    );
+  String _formatDateGroup(DateTime date) {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final yesterday = today.subtract(const Duration(days: 1));
+    final targetDate = DateTime(date.year, date.month, date.day);
+
+    if (targetDate == today) {
+      return 'วันนี้';
+    } else if (targetDate == yesterday) {
+      return 'เมื่อวาน';
+    } else {
+      return DateFormat('d MMM yyyy').format(date);
+    }
   }
 
   void _openApp(String packageName) {
-    // Try to launch the app using Android Intent
-    // We'll use platform channel or url_launcher as fallback
     try {
-      // Use Android Intent to open the app
       _launchApp(packageName);
     } catch (e) {
       if (mounted) {
@@ -192,10 +255,7 @@ class _NotificationListScreenState extends State<NotificationListScreen> {
   }
 
   Future<void> _launchApp(String packageName) async {
-    // Use flutter's platform channel to launch app by package name
-    // For now, we'll use a simple approach with url_launcher or intent
     try {
-      // Android-specific: launch app via Intent
       final intent = AndroidIntent(packageName: packageName);
       await intent.launch();
     } catch (e) {
@@ -209,7 +269,6 @@ class _NotificationListScreenState extends State<NotificationListScreen> {
   }
 }
 
-/// Simple helper to hold app display info
 class _AppInfo {
   final String name;
   final Color color;
@@ -218,7 +277,6 @@ class _AppInfo {
   const _AppInfo(this.name, this.color, this.emoji);
 }
 
-/// Minimal AndroidIntent helper using MethodChannel
 class AndroidIntent {
   final String packageName;
   const AndroidIntent({required this.packageName});
