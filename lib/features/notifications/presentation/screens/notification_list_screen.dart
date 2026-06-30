@@ -16,7 +16,6 @@ class _NotificationListScreenState extends State<NotificationListScreen> {
   static const Map<String, _AppInfo> _appRegistry = {
     'jp.naver.line.android': _AppInfo('LINE', Colors.green, '💬'),
     'com.facebook.orca': _AppInfo('Messenger', Colors.blue, '💬'),
-    'com.facebook.katana': _AppInfo('Facebook', Colors.indigo, '📘'),
     'com.instagram.android': _AppInfo('Instagram', Colors.pink, '📷'),
     'com.whatsapp': _AppInfo('WhatsApp', Colors.teal, '💬'),
     'com.twitter.android': _AppInfo('X (Twitter)', Colors.blueGrey, '🐦'),
@@ -44,9 +43,9 @@ class _NotificationListScreenState extends State<NotificationListScreen> {
         final now = DateTime.now();
         final cutoffDate = now.subtract(const Duration(days: 14));
 
-        // Filter last 14 days and sort by newest first
+        // Filter last 14 days, remove old Facebook App notifications, and sort by newest first
         var notifs = snapshot.data!
-            .where((n) => n.timestamp.isAfter(cutoffDate))
+            .where((n) => n.timestamp.isAfter(cutoffDate) && n.packageName != 'com.facebook.katana')
             .toList();
         notifs.sort((a, b) => b.timestamp.compareTo(a.timestamp));
 
