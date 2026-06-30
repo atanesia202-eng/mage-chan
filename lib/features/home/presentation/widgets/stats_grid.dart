@@ -28,7 +28,7 @@ class StatsGrid extends ConsumerWidget {
         children: [
           _buildStatCard(
             context,
-            "Reminders",
+            "สิ่งที่ต้องทำ",
             remindersAsync.when(
               data: (count) => count.toString(),
               loading: () => "...",
@@ -42,7 +42,7 @@ class StatsGrid extends ConsumerWidget {
           ),
           _buildStatCard(
             context,
-            "Notifications",
+            "ข้อความ (14 วัน)",
             notificationsAsync.when(
               data: (count) => count.toString(),
               loading: () => "...",
@@ -56,7 +56,7 @@ class StatsGrid extends ConsumerWidget {
           ),
           _buildStatCard(
             context,
-            "Calls Today",
+            "สายโทรเข้าวันนี้",
             callsAsync.when(
               data: (count) => count.toString(),
               loading: () => "...",

@@ -11,14 +11,15 @@ final activeRemindersCountProvider = StreamProvider<int>((ref) {
   });
 });
 
-/// Provider: จำนวน Social Notification ที่ได้รับวันนี้
+/// Provider: จำนวน Social Notification ในรอบ 14 วัน
 final todayNotificationsCountProvider = StreamProvider<int>((ref) {
   return IsarService.watchSocialNotifications().map((notifications) {
     final now = DateTime.now();
+    final cutoffDate = now.subtract(const Duration(days: 14));
+    
     return notifications.where((n) =>
-      n.timestamp.year == now.year &&
-      n.timestamp.month == now.month &&
-      n.timestamp.day == now.day
+      n.timestamp.isAfter(cutoffDate) && 
+      n.packageName != 'com.facebook.katana'
     ).length;
   });
 });
