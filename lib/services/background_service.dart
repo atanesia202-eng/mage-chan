@@ -9,6 +9,9 @@ import '../models/finance_model.dart';
 import '../models/social_notification_model.dart';
 import '../models/fixed_expense_model.dart';
 import '../services/notification_service.dart';
+import '../services/social_notification_service.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_notification_listener/flutter_notification_listener.dart';
 
 class BackgroundServiceManager {
   static final BackgroundServiceManager _instance = BackgroundServiceManager._internal();
@@ -74,6 +77,37 @@ void onStart(ServiceInstance service) async {
 
   service.on('stopService').listen((event) {
     service.stopSelf();
+  });
+
+  // HACK: Intercept the notification listener method channel in the background isolate
+  // because flutter_background_service overwrites the FlutterEngineCache!
+  const bgChannel = MethodChannel('flutter_notification_listener/bg_method');
+  bgChannel.setMethodCallHandler((call) async {
+    debugPrint('[SocialNotif:HackBG] 🚨 INTERCEPTED METHOD in Background Engine: ${call.method}');
+    if (call.method == 'sink_event') {
+      try {
+        final args = call.arguments as List<dynamic>;
+        final map = args[1] as Map<dynamic, dynamic>;
+        final event = NotificationEvent.fromMap(map);
+        
+        final data = SocialNotificationService.extractDataFromEvent(event);
+        if (data != null && db != null) {
+          final model = SocialNotificationModel()
+            ..appName = data['appName']!
+            ..packageName = data['packageName']!
+            ..title = data['title']!
+            ..content = data['content']!
+            ..timestamp = DateTime.fromMillisecondsSinceEpoch(int.parse(data['timestamp']!));
+            
+          await db!.writeTxn(() async {
+            await db!.socialNotificationModels.put(model);
+          });
+          debugPrint('[SocialNotif:HackBG] ✅ Saved notification from background isolate!');
+        }
+      } catch (e) {
+        debugPrint('[SocialNotif:HackBG] ❌ Error parsing event: $e');
+      }
+    }
   });
 
   // Track which notifications we've already sent to avoid duplicates

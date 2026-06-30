@@ -18,16 +18,32 @@ class HomeScreen extends ConsumerStatefulWidget {
   ConsumerState<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends ConsumerState<HomeScreen> {
+class _HomeScreenState extends ConsumerState<HomeScreen> with WidgetsBindingObserver {
   bool _devMode = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _loadDevMode();
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       PermissionManager.requestAllPermissions(context);
     });
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      debugPrint('[HomeScreen] App resumed — re-registering social listener');
+      SocialNotificationService().reRegisterPort();
+      SocialNotificationService().startListening();
+    }
   }
 
   Future<void> _loadDevMode() async {

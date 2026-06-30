@@ -1,17 +1,23 @@
+import 'dart:convert';
+import 'dart:io';
 import 'dart:isolate';
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_notification_listener/flutter_notification_listener.dart';
+import 'package:path_provider/path_provider.dart';
 import '../database/isar_service.dart';
 import '../models/social_notification_model.dart';
 
 const _listenerPortName = 'mage_chan_social_listener';
+const _pendingFileName = 'pending_social_notifications.jsonl';
 
 /// Service that listens for incoming notifications from social media apps
 /// and saves them to the local Isar database.
 class SocialNotificationService {
-  static final SocialNotificationService _instance = SocialNotificationService._internal();
+  static final SocialNotificationService _instance =
+      SocialNotificationService._internal();
   factory SocialNotificationService() => _instance;
   SocialNotificationService._internal();
 
@@ -41,12 +47,36 @@ class SocialNotificationService {
   /// Initialize listener and wire events into the main isolate (where Isar is open).
   Future<void> initialize() async {
     try {
+      debugPrint('[SocialNotif] ▶ Initializing...');
       _setupMainIsolateReceiver();
+      
+      // HACK: Intercept the background method channel directly in the main isolate
+      const bgChannel = MethodChannel('flutter_notification_listener/bg_method');
+      bgChannel.setMethodCallHandler((call) async {
+        debugPrint('[SocialNotif:Hack] 🚨 INTERCEPTED METHOD: ${call.method}');
+        if (call.method == 'sink_event') {
+          try {
+            final args = call.arguments as List<dynamic>;
+            final map = args[1] as Map<dynamic, dynamic>;
+            final event = NotificationEvent.fromMap(map);
+            final data = extractDataFromEvent(event);
+            if (data != null) {
+              await _handleParsedNotification(data);
+            }
+          } catch (e) {
+            debugPrint('[SocialNotif:Hack] ❌ Error parsing event: $e');
+          }
+        }
+      });
+
       await NotificationsListener.initialize(
         callbackHandle: _backgroundNotificationCallback,
       );
-    } catch (e) {
-      debugPrint('SocialNotificationService init error: $e');
+      // Import any pending notifications saved by background callback when app was closed
+      await importPendingNotifications();
+      debugPrint('[SocialNotif] ✅ Initialized successfully');
+    } catch (e, stack) {
+      debugPrint('[SocialNotif] ❌ Init error: $e\n$stack');
     }
   }
 
@@ -59,34 +89,51 @@ class SocialNotificationService {
       _listenerPortName,
     );
     _receivePort!.listen((message) {
-      if (message is NotificationEvent) {
-        handleNotificationEvent(message);
+      debugPrint(
+          '[SocialNotif] 📨 Received event in main isolate: ${message.runtimeType}');
+      // FIX: Accept Map<String, String> instead of NotificationEvent.
+      // SendPort can only transmit primitive types, Lists, and Maps — not custom objects.
+      if (message is Map) {
+        _handleParsedNotification(Map<String, String>.from(message));
       }
     });
+    debugPrint('[SocialNotif] 📡 Main isolate receiver registered');
+  }
+
+  /// Re-register the IsolateNameServer port (call on app resume).
+  void reRegisterPort() {
+    debugPrint('[SocialNotif] 🔄 Re-registering main isolate port...');
+    _setupMainIsolateReceiver();
   }
 
   /// Start or restart the Android notification listener service.
   Future<bool> startListening() async {
     try {
-      final hasPermission = await NotificationsListener.hasPermission ?? false;
-      if (!hasPermission) {
-        debugPrint('SocialNotificationService: no notification listener permission');
+      final perm = await NotificationsListener.hasPermission ?? false;
+      debugPrint('[SocialNotif] 🔑 Permission: $perm');
+      if (!perm) {
+        debugPrint('[SocialNotif] ⚠️ No notification listener permission!');
         return false;
       }
 
-      final isRunning = await NotificationsListener.isRunning ?? false;
-      if (!isRunning) {
+      final running = await NotificationsListener.isRunning ?? false;
+      debugPrint('[SocialNotif] 🏃 Service running: $running');
+      if (!running) {
         await NotificationsListener.startService(
           foreground: true,
           title: 'Mage-chan Notification Listener',
           description: 'กำลังดักจับแจ้งเตือนเพื่อนายท่าน...',
         );
+        debugPrint('[SocialNotif] ✅ Listener service started');
       }
 
-      debugPrint('SocialNotificationService: listening active');
+      // Import pending notifications from background saves
+      await importPendingNotifications();
+
+      debugPrint('[SocialNotif] ✅ Listening active');
       return true;
-    } catch (e) {
-      debugPrint('SocialNotificationService start error: $e');
+    } catch (e, stack) {
+      debugPrint('[SocialNotif] ❌ Start error: $e\n$stack');
       return false;
     }
   }
@@ -100,38 +147,79 @@ class SocialNotificationService {
     return await NotificationsListener.hasPermission ?? false;
   }
 
-  /// Process a notification in the main isolate and persist it.
-  static Future<void> handleNotificationEvent(NotificationEvent event) async {
+  Future<bool> isListenerRunning() async {
+    return await NotificationsListener.isRunning ?? false;
+  }
+
+  /// Process a parsed notification Map in the main isolate and persist it to Isar.
+  static Future<void> _handleParsedNotification(Map<String, String> data) async {
     try {
-      final packageName = event.packageName ?? '';
-      if (!trackedPackages.contains(packageName)) return;
+      final appName = data['appName'] ?? '';
+      final packageName = data['packageName'] ?? '';
+      final title = data['title'] ?? '';
+      final content = data['content'] ?? '';
 
-      // Skip group summary rows that carry no message body.
-      if (event.isGroup == true) {
-        final preview = _extractContent(event);
-        if (preview.isEmpty) return;
+      debugPrint('[SocialNotif] 📝 Handling parsed: $appName | "$title" | "$content"');
+
+      if (title.isEmpty && content.isEmpty) {
+        debugPrint('[SocialNotif] ⏭️ Empty title and content, skipping');
+        return;
       }
-
-      var title = _extractTitle(event);
-      var content = _extractContent(event);
-
-      if (title.isEmpty && content.isEmpty) return;
-      if (content.isEmpty) content = title;
-
-      final appName = appNames[packageName] ?? packageName;
 
       final notif = SocialNotificationModel()
         ..appName = appName
         ..packageName = packageName
         ..title = title
-        ..content = content
+        ..content = content.isNotEmpty ? content : title
         ..timestamp = DateTime.now();
 
       await IsarService.saveSocialNotification(notif);
-      debugPrint('Saved notification from $appName: $title — $content');
-    } catch (e) {
-      debugPrint('Error handling notification: $e');
+      debugPrint('[SocialNotif] ✅ Saved: $appName | $title | $content');
+    } catch (e, stack) {
+      debugPrint('[SocialNotif] ❌ Error handling parsed notification: $e\n$stack');
     }
+  }
+
+  /// Process a notification in the main isolate and persist it.
+  /// Kept for backward compatibility.
+  static Future<void> handleNotificationEvent(NotificationEvent event) async {
+    try {
+      final data = extractDataFromEvent(event);
+      if (data == null) return;
+      await _handleParsedNotification(data);
+    } catch (e, stack) {
+      debugPrint('[SocialNotif] ❌ Error handling notification: $e\n$stack');
+    }
+  }
+
+  /// Extract title, content, appName, packageName from a NotificationEvent
+  /// into a simple Map<String, String> that can be sent through SendPort
+  /// or saved to a pending file.
+  ///
+  /// Returns null if the event should be skipped (not tracked, empty, etc.)
+  static Map<String, String>? extractDataFromEvent(NotificationEvent event) {
+    final packageName = event.packageName ?? '';
+
+    if (!trackedPackages.contains(packageName)) {
+      return null;
+    }
+
+    var title = _extractTitle(event);
+    var content = _extractContent(event);
+    
+    // DEBUG: Force save even if empty
+    if (title.isEmpty) title = '(No Title)';
+    if (content.isEmpty) content = '(No Content)';
+    if (event.isGroup == true) content = '[Group] $content';
+
+    final appName = appNames[packageName] ?? packageName;
+
+    return {
+      'appName': appName,
+      'packageName': packageName,
+      'title': title,
+      'content': content,
+    };
   }
 
   static String _extractTitle(NotificationEvent event) {
@@ -183,11 +271,148 @@ class SocialNotificationService {
 
     return '';
   }
+
+  /// Import pending notifications saved by the background callback to Isar.
+  static Future<int> importPendingNotifications() async {
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final file = File('${dir.path}/$_pendingFileName');
+      if (!await file.exists()) {
+        debugPrint('[SocialNotif] 📂 No pending file found');
+        return 0;
+      }
+
+      final content = await file.readAsString();
+      if (content.trim().isEmpty) {
+        debugPrint('[SocialNotif] 📂 Pending file is empty');
+        return 0;
+      }
+
+      final lines = content.trim().split('\n');
+      int imported = 0;
+
+      for (final line in lines) {
+        if (line.trim().isEmpty) continue;
+        try {
+          final map = jsonDecode(line) as Map<String, dynamic>;
+          final notif = SocialNotificationModel()
+            ..appName = map['appName'] as String
+            ..packageName = map['packageName'] as String
+            ..title = map['title'] as String
+            ..content = map['content'] as String
+            ..timestamp =
+                DateTime.fromMillisecondsSinceEpoch(map['timestamp'] as int);
+
+          await IsarService.saveSocialNotification(notif);
+          imported++;
+        } catch (e) {
+          debugPrint('[SocialNotif] ⚠️ Error importing line: $e');
+        }
+      }
+
+      // Clear the file after successful import
+      await file.writeAsString('');
+      debugPrint('[SocialNotif] 📥 Imported $imported pending notifications');
+      return imported;
+    } catch (e) {
+      debugPrint('[SocialNotif] ❌ Error importing pending: $e');
+      return 0;
+    }
+  }
+
+  /// Get count of pending notifications in the backup file
+  static Future<int> getPendingCount() async {
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final file = File('${dir.path}/$_pendingFileName');
+      if (!await file.exists()) return 0;
+      final content = await file.readAsString();
+      if (content.trim().isEmpty) return 0;
+      return content
+          .trim()
+          .split('\n')
+          .where((l) => l.trim().isNotEmpty)
+          .length;
+    } catch (e) {
+      return 0;
+    }
+  }
 }
 
-/// Background callback: forward events to the main isolate via SendPort.
+/// Background callback: extract data from the notification event, then
+/// forward as a simple Map to the main isolate via SendPort,
+/// or save to a pending file if the main isolate is not available.
+///
+/// IMPORTANT: SendPort.send() can only transmit primitive types (null, num,
+/// bool, String), Lists, Maps, SendPorts, and typed data lists.
+/// Custom objects like NotificationEvent CANNOT be sent — they will throw
+/// an ArgumentError. That's why we extract data into a Map<String, String> first.
 @pragma('vm:entry-point')
 void _backgroundNotificationCallback(NotificationEvent event) {
-  final sendPort = IsolateNameServer.lookupPortByName(_listenerPortName);
-  sendPort?.send(event);
+  try {
+    final packageName = event.packageName ?? 'unknown';
+    print('[SocialNotif:BG] 🔔 Callback fired: $packageName');
+
+    // DEBUG: Dump raw event to file
+    _debugDumpRawEvent(event);
+
+    // Extract data into a simple Map (serializable via SendPort)
+    final data = SocialNotificationService.extractDataFromEvent(event);
+    if (data == null) {
+      print('[SocialNotif:BG] ⏭️ Event filtered out (not tracked / empty)');
+      return;
+    }
+
+    print('[SocialNotif:BG] 📝 Extracted: ${data['appName']} | "${data['title']}" | "${data['content']}"');
+
+    // Try forwarding to main isolate for immediate processing
+    final sendPort = IsolateNameServer.lookupPortByName(_listenerPortName);
+    if (sendPort != null) {
+      // FIX: Send Map<String, String> instead of NotificationEvent object.
+      // SendPort cannot serialize custom Dart objects.
+      sendPort.send(data);
+      print('[SocialNotif:BG] ✅ Forwarded Map to main isolate');
+    } else {
+      // Main isolate is dead — save to pending file for later import
+      print('[SocialNotif:BG] ⚠️ Main isolate not available, saving to file');
+      _saveToPendingFile(data);
+    }
+  } catch (e) {
+    print('[SocialNotif:BG] ❌ Callback error: $e');
+  }
+}
+
+/// Save parsed notification data to a JSONL file for later import into Isar.
+Future<void> _saveToPendingFile(Map<String, String> data) async {
+  try {
+    final jsonData = jsonEncode({
+      ...data,
+      'timestamp': DateTime.now().millisecondsSinceEpoch,
+    });
+
+    final dir = await getApplicationDocumentsDirectory();
+    final file = File('${dir.path}/$_pendingFileName');
+    await file.writeAsString('$jsonData\n', mode: FileMode.append);
+    print('[SocialNotif:BG] ✅ Saved to pending file');
+  } catch (e) {
+    print('[SocialNotif:BG] ❌ Error saving to file: $e');
+  }
+}
+
+Future<void> _debugDumpRawEvent(NotificationEvent event) async {
+  try {
+    final dir = await getApplicationDocumentsDirectory();
+    final file = File('${dir.path}/debug_notifications.jsonl');
+    final Map<String, dynamic> debugData = {
+      'timestamp': DateTime.now().millisecondsSinceEpoch,
+      'packageName': event.packageName,
+      'title': event.title,
+      'text': event.text,
+      'isGroup': event.isGroup,
+      'raw': event.raw,
+    };
+    await file.writeAsString('${jsonEncode(debugData)}\n', mode: FileMode.append);
+  } catch (e) {
+    print('[SocialNotif:BG] ❌ Debug dump error: $e');
+  }
 }
