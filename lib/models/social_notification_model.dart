@@ -18,6 +18,10 @@ class SocialNotificationModel {
   /// Message content
   late String content; 
 
+  /// 'message' = chat message, 'notification' = social alert (likes, comments, etc.)
+  /// Empty string for legacy data (treated as 'message')
+  String type = '';
+
   /// Time when the notification was received
   late DateTime timestamp;
 }

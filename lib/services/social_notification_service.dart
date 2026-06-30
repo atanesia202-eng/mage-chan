@@ -160,11 +160,14 @@ class SocialNotificationService {
         return;
       }
 
+      final type = data['type'] ?? 'message';
+
       final notif = SocialNotificationModel()
         ..appName = appName
         ..packageName = packageName
         ..title = title
         ..content = content.isNotEmpty ? content : title
+        ..type = type
         ..timestamp = DateTime.now();
 
       await IsarService.saveSocialNotification(notif);
@@ -203,10 +206,15 @@ class SocialNotificationService {
     var title = _extractTitle(event);
     var content = _extractContent(event);
 
-    // Filter out non-message notifications (Likes, Comments, Mentions, Adds)
-    if (!_isLikelyChatMessage(packageName, title, content)) {
-      debugPrint('[SocialNotif] ⏭️ Filtered out non-message notification: "$title" | "$content"');
-      return null;
+    // Determine type: message or notification
+    // Instagram can't distinguish DM vs social alert → always 'message'
+    String type;
+    if (packageName == 'com.instagram.android') {
+      type = 'message';
+    } else if (_isLikelyChatMessage(packageName, title, content)) {
+      type = 'message';
+    } else {
+      type = 'notification';
     }
 
     // DEBUG: Force save even if empty
@@ -221,6 +229,7 @@ class SocialNotificationService {
       'packageName': packageName,
       'title': title,
       'content': content,
+      'type': type,
     };
   }
 
@@ -231,69 +240,21 @@ class SocialNotificationService {
       return true;
     }
 
-    // LINE: also a dedicated messaging app
-    if (packageName == 'jp.naver.line.android') {
-      return true;
-    }
-
     final lowerContent = content.toLowerCase();
     final lowerTitle = title.toLowerCase();
-
-    // --- Instagram-specific filtering ---
-    if (packageName == 'com.instagram.android') {
-      // Instagram DM notifications typically say "sent you a message" or just show
-      // the message content directly with the sender's name as title.
-      // Non-DM notifications say things like "liked your photo", "started following you", etc.
-
-      // Whitelist: keywords that indicate a DM
-      final igDmKeywords = [
-        'sent you a message', 'ส่งข้อความ', 'sent a photo', 'sent a video',
-        'sent an audio', 'sent a reel', 'sent a post', 'sent a story',
-        'ส่งรูปภาพ', 'ส่งวิดีโอ', 'ส่งโพสต์', 'ส่งสตอรี่',
-      ];
-
-      for (final kw in igDmKeywords) {
-        if (lowerContent.contains(kw) || lowerTitle.contains(kw)) {
-          return true; // This IS a DM
-        }
-      }
-
-      // Blacklist: keywords that indicate a social notification (NOT a DM)
-      final igSocialKeywords = [
-        'liked', 'ถูกใจ', 'commented', 'แสดงความคิดเห็น',
-        'mentioned', 'กล่าวถึง', 'started following', 'เริ่มติดตาม',
-        'tagged', 'แท็ก', 'is live', 'ถ่ายทอดสด', 'going live',
-        'added to their story', 'เพิ่มลงในสตอรี่',
-        'shared a post', 'shared a reel',
-        'recently posted', 'โพสต์ใหม่',
-        'reacted', 'replied to your story', 'ตอบกลับสตอรี่',
-        'new follower', 'follow request', 'คำขอติดตาม',
-        'suggested for you', 'แนะนำสำหรับคุณ',
-        'your post', 'your photo', 'your reel', 'your story',
-        'โพสต์ของคุณ', 'รูปของคุณ',
-      ];
-
-      for (final kw in igSocialKeywords) {
-        if (lowerContent.contains(kw) || lowerTitle.contains(kw)) {
-          return false; // NOT a DM, filter it out
-        }
-      }
-
-      // If we can't determine, default to filtering OUT for IG
-      // (better to miss a DM than to flood with social noise)
-      debugPrint('[SocialNotif] ⚠️ IG notification unclassified, filtering out: "$title" | "$content"');
-      return false;
-    }
-
-    // --- General filtering for other apps (Twitter, etc.) ---
+    
+    // Common keywords for Non-Message notifications (Thai and English)
     final nonMessageKeywords = [
       'ถูกใจ', 'แสดงความคิดเห็น', 'กล่าวถึง', 'เพิ่มคุณเป็นเพื่อน', 'กำลังถ่ายทอดสด',
       'liked', 'commented', 'mentioned', 'added you', 'is live', 'followed you',
-      'เริ่มติดตามคุณ', 'reacted', 'replied to your',
+      'เริ่มติดตามคุณ', 'ตอบกลับ', 'reacted', 'replied', 'sent an attachment'
     ];
 
     for (final kw in nonMessageKeywords) {
       if (lowerContent.contains(kw) || lowerTitle.contains(kw)) {
+        // Exception: "replied to you" or "ตอบกลับ" might be a chat reply, but usually 
+        // in LINE/IG it means someone replied to a story or post. 
+        // We'll be aggressive in filtering out social noise.
         return false;
       }
     }
@@ -376,6 +337,7 @@ class SocialNotificationService {
             ..packageName = map['packageName'] as String
             ..title = map['title'] as String
             ..content = map['content'] as String
+            ..type = (map['type'] as String?) ?? 'message'
             ..timestamp = DateTime.fromMillisecondsSinceEpoch(
               map['timestamp'] as int,
             );
