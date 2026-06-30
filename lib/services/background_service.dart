@@ -93,11 +93,11 @@ void onStart(ServiceInstance service) async {
         final data = SocialNotificationService.extractDataFromEvent(event);
         if (data != null && db != null) {
           final model = SocialNotificationModel()
-            ..appName = data['appName']!
-            ..packageName = data['packageName']!
-            ..title = data['title']!
-            ..content = data['content']!
-            ..timestamp = DateTime.fromMillisecondsSinceEpoch(int.parse(data['timestamp']!));
+            ..appName = data['appName'] ?? ''
+            ..packageName = data['packageName'] ?? ''
+            ..title = data['title'] ?? ''
+            ..content = data['content'] ?? ''
+            ..timestamp = DateTime.now();
             
           await db.writeTxn(() async {
             await db.socialNotificationModels.put(model);
