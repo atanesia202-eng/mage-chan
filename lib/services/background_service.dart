@@ -91,7 +91,8 @@ void onStart(ServiceInstance service) async {
         final event = NotificationEvent.fromMap(map);
         
         final data = SocialNotificationService.extractDataFromEvent(event);
-        if (data != null && db != null) {
+        final localDb = db;
+        if (data != null && localDb != null) {
           final model = SocialNotificationModel()
             ..appName = data['appName'] ?? ''
             ..packageName = data['packageName'] ?? ''
@@ -99,8 +100,8 @@ void onStart(ServiceInstance service) async {
             ..content = data['content'] ?? ''
             ..timestamp = DateTime.now();
             
-          await db.writeTxn(() async {
-            await db.socialNotificationModels.put(model);
+          await localDb.writeTxn(() async {
+            await localDb.socialNotificationModels.put(model);
           });
           debugPrint('[SocialNotif:HackBG] ✅ Saved notification from background isolate!');
         }
